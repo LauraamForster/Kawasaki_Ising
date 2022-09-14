@@ -1,242 +1,183 @@
+import random
 import numpy as np
 import matplotlib.pyplot as plt
-import networkx as nx
-from statistics import *
+import scipy.optimize
+import pickle
 
-counter = 0
-graphmch = []
-mcs = []
+#----------------
+#Define some initial conditions and variables
 
-#----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Function to plot the output of the file to display location of clusters
-
-def Plotter(col, row, box_width, box_height, n_big_comp, counter, listy):
-    print('counter,', counter) #print what number counter is up to
-
-    fig = plt.figure(figsize=(3.5, 7)) #sets the size of the figure pane
-    ax1 = fig.add_subplot(1,1,1) #puts all subplots overlaid
-
-    plt.scatter(col,row,alpha=0.5,linewidths=0.0) #plot the particles in the system
-    
-    plt.xticks([]) #removes x axis values
-    plt.yticks([]) #removes y axis values
-    plt.ylim([box_height+1, -1]) #sets height of box (with values in ascending order from 0 at top to height at bottom, to match matrix). (An extra point added each way so spots dont hang over edge)
-    plt.xlim([-1,box_width+1]) #sets width of box (An extra point added each way so spots dont hang over edge)
-    plt.tight_layout() #fits to size of pane
-    #
-    for i in range(0,n_big_comp):
-        for ip in listy[i]: 
-            plt.scatter(col[ip],row[ip],alpha=0.5,linewidths=0.0,c='red') #display the connected components in red to show them clearly
-    #
-    plt.xticks([]) #removes x axis values
-    plt.yticks([]) #removes y axis values
-    plt.ylim([box_height+1, -1]) #sets height of box (with values in ascending order from 0 at top to height at bottom, to match matrix). 
-                                #(An extra point added each way so spots dont hang over edge)
-    plt.xlim([-1,box_width+1]) #sets width of box (An extra point added each way so spots dont hang over edge)
-    plt.tight_layout()
-    plt.show()
-
-    return counter
+Lhe = 500 #define system size height
+Lwid = 100 #define system size width
+T = 1.25 #temperature of system
+dil = 0.1 #dilution of particles in system
+run_cycles = 100 
+run = run_cycles*100*(Lwid*Lhe) #total number of cycles of lattice site
+air = 2 #define amount of system which is air 
+Evap_cycle = 40 #number of cycles in between each evaporation
+Evap_steps=Evap_cycle*Lwid*Lhe 
+count, counter, EngCount, accumE, accumEsq = 0, 0, 0, 0.0, 0.0 #create some variables to use
+Eng_arr = []
+Images = []
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Function to calculate the mean height and size of clusters at each interval
+#Create the lattice and populate, as well as some needed arrays.
 
-def meanheightcalc(row, n_big_comp, listy, graphmch, mcs): #function finds the mean point where all the clusters sit, and finds mean size of clusters
-    #if clusters form towards the air interface, then value will be low to denote row number they on average sit at
-    mch=[]
-    clussize=[]
-# determines the mean cluster height
-    for i in range(0,n_big_comp): #range of clusters over threshold size
-        cluster_height = 0 #empty array for each time
-        for ip in listy[i]: 
-            cluster_height = cluster_height + row[ip] #add height location of particles together
-        clustersize = len(listy[i]) #determines number of points in each cluster
-        clussize.append(clustersize) 
-        meanheight = 0 #empty variable each time
-        meanheight = cluster_height/clustersize #finds mean height of each cluster
-        mch.append(meanheight) #adds mean height to array 
+#Create a lattice (of defined size, with random points determined as 1 or -1)
+S=np.zeros((Lhe, Lwid), dtype=int) #creates empty lattice
+for i in range(Lhe):
+        for j in range(Lwid):
+                r=random.uniform(0, 1) #determines a random number between 0 and 1
+                if r<=dil: S[i, j]=1 #if random number is less than .5 change point in lattice to 1
+                else: S[i, j]=-1 #if not, make point in lattice -1
+                if i < air: #the defined parts of the system which are air
+                    S[0:Lwid] = 0 #are set as 0
+                   
+px, py =np.arange(Lhe, dtype=int)+1, np.arange(Lwid, dtype=int)+1 #create an array of same size as lattice height, integers in ascending order, add 1 to make it start from 1
+px[-1]=0 #make the final value 0
+py[-1]=0 #make the final value 0
 
-# determines the mean cluster size
-    mean_clusterh2 = 0 #empty the variable each time
-    for i in range(n_big_comp): #in range of clusters over threshold size
-        mean_clusterh2 = mch[i] + mean_clusterh2 #add cluster means together
-    numbclusts = len(clussize) #number of clusters 
-    for i in range(numbclusts):
-        clustersize = clussize[i] + clustersize 
-    meanclussize = clustersize/numbclusts #finds the mean size
-    print('mean cluster size in system is', meanclussize) #prints the mean size of the clusters at each output
-    mcs.append(meanclussize)
-    
-    heightinsystem = mean_clusterh2/n_big_comp #divide by number of clusters
-    graphmch.append(heightinsystem) 
-    print('mean cluster height in system is', heightinsystem) #prints the mean height of the clusters at each output
-
-    return heightinsystem, graphmch, mcs
+mx, my=np.arange(Lhe, dtype=int)-1, np.arange(Lwid, dtype=int)-1 #create a second array of same size as height and one of width, integers in ascending order, minus 1 to make it start from -1
+mx[0]=Lhe-1 #make first value lattice size-1
+my[0]=Lwid-1 #make first value lattice size-1
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Function to calculate the mean size of clusters 
-def plotmeansize(listy):
-    sizesofclus=[]
-    length = len(listy)
-    for x in range(length):
-        value = len(listy[x])
-        sizesofclus.append(value)
-    return sizesofclus
+#Functions to periodically calculate energy (hamiltonian) and to simulate evaporation
 
+def Energy(lattice): #function to calculate energy occasionally
+    energy = 0 #reset energy variable to 0
 
-#----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Function to find the clusters within the system and quantify them - uses NetworkX package
+    for a in range(Lhe): #for every point in the lattice
+        for b in range(Lwid):
+            First = lattice[a,b] #find the value of the point
+            Surr = lattice[(a+1)%Lhe, b] + lattice[a,(b+1)%Lwid] + lattice[(a-1)%Lhe, b] + lattice[a,(b-1)%Lwid] #find point's neighbours and sum value of neighbours
+            energy += Surr*First #multiply value of point, and its summed neighbours together, and add to energy value
+    return energy/2 #return half the energy value
 
-def Cluster(array, counter, graphmch, mcs):
-    print(' ') #creates a gap to seperate print outs for each part of the system to make it easier to see what output is for what part
+def Evapfunc(S, air, counter): #function to simulate evaporation
+    check_before=np.count_nonzero(S==1)  #counts the number of particles in system 
+    succeed=True
 
-    row=total_array[:,0] #defined as the first value in the (x,y coords) and defines the row number (which row from top to bottom)
-    col=total_array[:,1] #defined as the second value in the (x,y coords) and defines the column number (which column from left to right)
+    row = S[air,:] #defines a whole row, not including those which are air
 
-    N=len(row) #gives the number of particles in the system
-    print('number of particles ',N)
-
-    G=nx.Graph() # create networkx graph G
-    
-    for i in range(0,N): #adds a node for each particle in system
-        G.add_node(i) # add nodes
-        
-    for i in range(0,N):
-        for j in range(0,N):
-            if(i != j): 
-                # rsq=(x[i]-x[j])**2+(y[i]-y[j])**2
-                if( np.abs(row[i]-row[j]) < 1.01 and np.abs(col[i]-col[j]) < 1.01 ): #add connections if there are 2 points next to each other
-                    G.add_edge(i,j) # add connection one way
-                    G.add_edge(j,i) # add connection the opposite way
-
-    # print(list(nx.connected_components(G))) 
-    n_connect_comp=nx.number_connected_components(G) #calculates the number of connected components
-    print('total number of connected components ',n_connect_comp)
-
-    print('sorting connected components fromn biggest to smallest')
-    listy=sorted(nx.connected_components(G), key=len, reverse=True) #sorts the connected components from biggest to smallest
-    
-    list_clust_sizes = plotmeansize(listy) 
-
-    biggest=len(listy[0]) #finds the biggest component's size
-    print('biggest component has size ',biggest) 
-
-    big_threshold=10 #defines a threshold of the number of connected components 
-    print('counting connected components with at least ',big_threshold,' particles')
-
-    for i in range(0,n_connect_comp): 
-        if( len(listy[i])<big_threshold): #if the threshold is bigger than the coordinate for the biggest component then break
-            n_big_comp=i
+    for j in range(0,Lwid): 
+        n_vacancies_column=np.count_nonzero(S[air:Lhe,j]==-1) #count number of spaces without particles in that column 
+        print('number vacancies in column j ',n_vacancies_column)  # prints no. of vacancies
+        if(n_vacancies_column==0): #if there are no spaces
+            print('evaporation step impossible, system jammed!') #prints that system is jammed
+            succeed=False 
             break
+        else:
+            print('evaporating in column ',j) #prints which column the evaporation is on
+            if(S[air,j]==1): #checks if the top value of column contains particle
+                for i in range (air+1,Lhe): #checks all the rows under the air rows 
+                   if S[i,j] == -1: #if there is a space in that column
+                       S[i,j]=1 #the particle can move down to the nearest one
+                       break
+            S[air,j]=0 # converts the particle in top of column to air to complete evaporation
+ 
+    check_after=np.count_nonzero(S==1) #counts the number of particles in the system
+    print('before and after number of particles ',check_before, check_after)
+    if(check_after != check_before): #checks the number of particles before and after evap is conserved
+        print('PANIC, particle number not conserved!') 
 
-    print(n_big_comp,' connected components with at least ',big_threshold,' particles')
+    # if counter % Evap_steps == 0:
+    Images.append(S) #appends a copy of the matrix to a list so print outs of system are shown at the end
 
-    Cluster_res= Plotter(col, row, box_width, box_height, n_big_comp, counter, listy)
-    meanheight, graphmch, mcs= meanheightcalc(row, n_big_comp, listy, graphmch, mcs)
-
-    return list_clust_sizes, graphmch, mcs
-#----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# read in file to analyse
-
-filename='Matrices_During_Ising.txt'
-
-with open(filename) as fs:
-    txtfile = []
-    for line in fs:
-        txtfile.append(line.strip())
-
-size = txtfile[0].split()
-box_height = int(size[2].split('=')[1]) #height of box (how tall top to bottom/ y coord)
-box_width = int(size[3].split('=')[1]) #width of box (how wide left to right/ x coord)
-
-total_array = np.array([]) #create an empty array
-length = len(txtfile) 
-for i in range(length):
-    if 'Matrix' in txtfile[i]: #each matrix contains a title to be read in
-        leng = len(total_array)
-        total_array = np.reshape(total_array, (int(leng/2), 2)) 
-        total_array = total_array.astype(int)
-        if leng != 0: #if the array contains some data
-            counter = counter + 1
-            if counter % 1 == 0:
-                cluster_sizes, graphmch, mcs = Cluster(total_array, counter, graphmch, mcs) #call the Cluster Function to find connected components
-        total_array = np.array([]) #empty the array 
-    else:
-        split = txtfile[i].split() #split the text file by each line for each coordinate
-        col_coord = int(split[0]) #find the column coordinate (from left to right)
-        row_coord = int(split[1]) #find the row coordinate (from top to bottom)
-        point = [(col_coord, row_coord)] #define each particle as a point with coordinates
-        total_array = np.append(total_array, point) #add the point to the array
+    return S, air, succeed, Images
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
-#display the histogram for the final output, displays amount of clusters at each size
+#Kawasaki Dynamics Ising Model Swaps
 
-sortedclusters = sorted(cluster_sizes) #sorts clusters by size
-freq = {}
-for item in sortedclusters: #creates a dictionary 
-    if (item in freq):
-        freq[item] += 1
-    else:
-        freq[item] = 1
-#prints output of histogram to see exactly how many clusters at each cluster size
-for key, value in freq.items(): 
-    print ("cluster size", "% d : % d"%(key, value))
+for M in range(run): 
+        count=count+1 #set a counter
+        if count % Evap_steps == 0: #every so often call evaporation
+            if air < Lhe-2: #if system isn't entirely air 
+                counter = counter + 1
+                S_tmp, air, evap_success, Images = Evapfunc(S, air, counter) #call evaporation function
+                if(evap_success): #if evaporation was successful
+                    air = air + 1 #redefine air to represent another row turned to air
+                    S=np.copy(S_tmp) #define S as new matrix
 
-plt.hist(cluster_sizes) #plot the particles in the system  
-plt.xlabel("Cluster Size")#axis label
-plt.ylabel("Amount of Clusters")#axis label
-plt.title("Histogram of Cluster Size")#sets graph title
-plt.show()
+
+        i, j=random.choice(range(Lhe)), random.choice(range(Lwid)) #choose a random point in matrix 
+        neb=random.choice([[0, 1], [0, -1], [-1, 0], [1, 0]]) #randomly chooses which neighbour to try and swap with
+
+        ineb=i+neb[0] #defines the coordinates of the chosen neighbouring particle
+        jneb=j+neb[1]
+
+        #sets some boundary conditions, so when an edge particle is chosen, the opposing edge can be swapped with instead
+        if ineb>Lhe-1: #if point is on bottom of matrix
+            ineb=0 #switch neighbour to top point 
+        if jneb>Lwid-1: #if point is on right hand side of matrix  
+            jneb=0 #switch to left hand side
+        if ineb<0: # if point is at the top of matrix
+            ineb=Lhe-1 #switch to bottom
+        if jneb<0: #if point is on left hand side of matrix
+            jneb=Lwid-1 #switch with right hand side
+
+
+        if S[i, j] != 0 and S[ineb, jneb] != 0: #If chosen particles are not air particles
+            deltaE1=(S[i, j]-S[ineb, jneb])*(S[px[i], j]+S[i, py[j]]+S[mx[i], j]+S[i, my[j]]-S[ineb, jneb]) #calculate current energy of matrix
+            deltaE2=(S[ineb,jneb]-S[i,j])*(S[px[ineb], jneb]+S[ineb,py[jneb]]+S[mx[ineb], jneb]+S[ineb, my[jneb]]-S[i,j]) #calculate the new energy of new matrix after swap
+            deltaE=deltaE1+deltaE2 #add energies together
+            W=np.exp(-deltaE/T) 
+            r=random.random()
+            if r<W: #Use monte carlo to determine if the swap will be ok
+                    itemp=np.copy(S[i,j]) #make a copy of origional point
+                    S[i,j]=S[ineb,jneb] #swap origional point with chosen neighbouring point
+                    S[ineb,jneb]=itemp #set chosen neighbouring point to origional value of point
+                    if count % Lwid**2 == 0: #occasionally calculate the energy
+                        EngCount = EngCount + 1 #set a counter
+                        Eng = Energy(S) #call energy function to calculate lattice energy
+                        accumE = accumE + float(Eng) #define accumulated energy
+                        accumEsq = accumEsq + float(Eng*Eng) #define accumulated energy squared
+                        Eng_arr.append(Eng) 
+
+#calculate the energy and variance total over the run
+meanE=accumE/EngCount 
+meanEsq=accumEsq/EngCount
+varE=meanEsq-meanE**2
+
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# display cluster height over time
-lengthgraph = len(graphmch) 
-timeaxis = np.arange(1, lengthgraph+1) #sets x axis to plot against
+#Output data for analysis in KW_Ising_Part2.py (to display plots of lattice progression)
 
-a, b = np.polyfit(timeaxis, graphmch, 1) #fits a straight line to data
+f = open("./Matrices_for_analysis_.txt", 'w') #open a textfile with defined name
+f.write('Matrix Dimensions: ' + 'height=' + str(Lhe) + '   ' + 'width=' +str(Lwid) + "\n")
+f.write('Initial Conditions: ' + 'dilution=' + str(dil) + '   ' + 'temperature=' + str(T) + '   ' +  'air=' + str(air) + '   ' +  'run=' + str(run_cycles) +  '   ' + 'evap=' + str(Evap_cycle) + "\n")
+f.write('Energy: ' + 'MeanEnergy=' + str(meanE) + '   ' + 'MeanSquaredEnergy=' + str(meanEsq) + '   ' + 'variance=' + str(varE) + "\n")
 
-plt.plot(timeaxis, graphmch) #plots the data
-plt.plot(timeaxis, a*timeaxis+b, color='red') #plots the fit in another colour
-plt.ylim([500, 0]) #reverses the axis to show the row number of box
+length = len(Images)
+for y in range(length):
+    f.write('Matrix number: ' + str(y) + "\n")
+    S_curr = Images[y]
+    np.savetxt(f, S_curr)
+f.close() #close the text file
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------
+#Output lattices for analysis in density_plot.py (to plot density profile of final lattice)
 
-plt.xlabel("Number of Run Cycles", fontsize=15) #axis label
-plt.ylabel("Row Number", fontsize=15) #axis label
-plt.xticks(fontsize=15) #makes labels larger
-plt.yticks(fontsize=15) #makes labels larger
-plt.title("Average Height of Clusters over Time", fontsize=20) #sets graph title
-leg = plt.legend(loc="upper left", fontsize=20, frameon=False,)
-# get the individual lines inside legend and set line width
-for line in leg.get_lines():
-    line.set_linewidth(6)
-# get label texts inside legend and set font size
-for text in leg.get_texts():
-    text.set_fontsize('x-large')
-plt.show()
+f = open("./Matrices_for_density_.txt", 'w') #open a textfile with defined name
+f.write('Matrix Dimensions: ' + 'height=' + str(Lhe) + '   ' + 'width=' +str(Lwid) + '   ' + 'air=' +str(air) + "\n")
 
-print('equation of fit is=', -a, "x + ", b) #gives equation for line of best fit
+length = len(Images)
+np.savetxt(f, S)
+f.close() #close the text file
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
-# display cluster size over time
-lengthgraphcs = len(mcs)
-timeaxis2 = np.arange(1, lengthgraphcs+1) #sets x axis to plot against
+#Output lattices for analysis in network.py (for cluster analysis) 
 
-c, d = np.polyfit(timeaxis2, mcs, 1) #fits a straight line to data
+f = open('./Matrices_During_Ising.txt', 'w') #open a textfile with defined name
+f.write('Matrix Dimensions: ' + 'height=' + str(Lhe) + '   ' + 'width=' +str(Lwid) + "\n")
 
-plt.plot(timeaxis2, mcs, color='blue', label="No Evaporation") #plots the data
-plt.plot(timeaxis2, a*timeaxis2+b, color='lightblue', label="Fit - No Evaporation") #plots the fit in another colour
+for y in range(length):
+    S_curr = Images[y]
+    particles = np.count_nonzero(S_curr==1)
+    f.write('New Matrix no. ' + str(y+1) + ' / no. of particles ' + str(particles) + ' / matrix size ' + str(Lhe) + ' x ' + str(Lwid) +"\n")
+    for i in range(Lhe):
+        for j in range(Lwid):
+            if S_curr[i, j] == 1: #for all the particles in the system
+                f.write(str(i) + '   ' + str(j) + "\n") #write each location onto the text file in columns 
+f.close() #close the text file
 
-plt.xlabel("Time", fontsize=15)
-plt.ylabel("Mean Cluster Size", fontsize=15)
-plt.xticks(fontsize=15)
-plt.yticks(fontsize=15)
-plt.title("Average Size of Clusters over Time - Temp 10.5", fontsize=20)
-leg = plt.legend(loc="upper left", fontsize=20, frameon=False,)
-# get the individual lines inside legend and set line width
-for line in leg.get_lines():
-    line.set_linewidth(6)
-# get label texts inside legend and set font size
-for text in leg.get_texts():
-    text.set_fontsize('x-large')
-plt.show()
 
-print('equation of fit is=', c, "x + ", d) #gives equation for line of best fit
